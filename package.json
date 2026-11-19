@@ -1,0 +1,19 @@
+{
+  "name": "laila-zohdy-voice-resume",
+  "version": "1.0.0",
+  "description": "Interactive voice resume for Laila Zohdy",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "dev": "node dev-server.mjs"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^1.10.0"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  }
+}
