@@ -1,6 +1,6 @@
 # Laila Zohdy — Voice Resume
 
-A minimal, pastel, single-page resume with a built-in **voice assistant**. Recruiters tap the orb, ask a question out loud (or type it), and a female voice answers using information from Laila's CV.
+A minimal, pastel, single-page resume with a built-in **voice assistant** in **English, French and Arabic** (switch with the EN · FR · ع buttons). Recruiters tap the orb, ask a question out loud (or type it), and a female voice answers using information from Laila's CV.
 
 It's **100% free**: no API keys, no server, no accounts.
 
