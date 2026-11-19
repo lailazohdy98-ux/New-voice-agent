@@ -10,11 +10,8 @@
   const muteBtn = $("mute");
   $("year").textContent = new Date().getFullYear();
 
-  const history = []; // { role: "user" | "assistant", content: string }
   let state = "idle"; // idle | listening | thinking | speaking
   let muted = false;
-  let premiumVoice = null; // null = unknown, true = ElevenLabs available, false = use browser voice
-  let currentAudio = null;
 
   // ───────── UI helpers ─────────
   function setState(next, text) {
@@ -39,10 +36,48 @@
     return el;
   }
 
-  // ───────── Speech output ─────────
+  // ───────── Find the best answer (runs entirely in the browser) ─────────
+  const KB = window.KNOWLEDGE;
+  const normalize = (t) =>
+    " " +
+    t.toLowerCase().replace(/[’']/g, "").replace(/[^a-z0-9#+\- ]+/g, " ").replace(/\s+/g, " ").trim() +
+    " ";
+
+  function score(topic, text, tokens) {
+    let total = 0;
+    for (const [key, weight = 1] of topic.keys) {
+      const hit = key.includes(" ")
+        ? text.includes(" " + key)
+        : tokens.some((t) => t === key || (key.length >= 4 && t.startsWith(key)));
+      if (hit) total += weight;
+    }
+    return total;
+  }
+
+  function findAnswer(question) {
+    const text = normalize(question);
+    const tokens = text.trim().split(" ");
+    const ranked = KB.topics
+      .map((topic) => ({ topic, s: score(topic, text, tokens) }))
+      .filter((r) => r.s > 0)
+      .sort((a, b) => b.s - a.s);
+
+    // Greetings / thanks only win on short messages ("hi", "thanks!").
+    let best = ranked[0];
+    if (best && ["hello", "thanks"].includes(best.topic.id) && tokens.length > 5) {
+      best = ranked.find((r) => !["hello", "thanks"].includes(r.topic.id));
+    }
+    return best && best.s >= 2 ? best.topic.answer : KB.fallback;
+  }
+
+  // ───────── Speech output (browser's built-in voice, free) ─────────
+  // Most natural-sounding female voices first (Edge "Natural", Apple "Premium/Enhanced", Google).
   const FEMALE_VOICES = [
-    /Google UK English Female/i, /Microsoft (Sonia|Libby|Aria|Jenny|Emma|Ava|Michelle) Online/i,
-    /Samantha/i, /Serena/i, /Karen/i, /Moira/i, /Tessa/i, /Victoria/i, /Fiona/i,
+    /Microsoft (Sonia|Libby|Aria|Jenny|Emma|Ava|Michelle).*Natural/i,
+    /(Serena|Samantha|Kate|Stephanie|Karen|Moira|Tessa|Fiona|Ava|Allison|Susan|Zoe).*\((Premium|Enhanced)\)/i,
+    /Microsoft (Sonia|Libby|Aria|Jenny|Emma|Ava|Michelle)/i,
+    /Google UK English Female/i,
+    /Serena/i, /Samantha/i, /Kate/i, /Karen/i, /Moira/i, /Tessa/i, /Victoria/i, /Fiona/i, /Ava/i, /Allison/i,
     /Microsoft (Zira|Hazel|Susan)/i, /Google US English/i, /female/i,
   ];
   let browserVoice = null;
@@ -61,13 +96,11 @@
   }
 
   function stopSpeaking() {
-    if (currentAudio) { currentAudio.pause(); currentAudio = null; }
     if (window.speechSynthesis) speechSynthesis.cancel();
   }
 
   function speakWithBrowser(text) {
     return new Promise((resolve) => {
-      if (!window.speechSynthesis) return resolve();
       // Chrome cuts long utterances, so speak sentence by sentence.
       const parts = text.match(/[^.!?]+[.!?]*\s*/g) || [text];
       let i = 0;
@@ -75,8 +108,9 @@
         if (i >= parts.length || state !== "speaking") return resolve();
         const u = new SpeechSynthesisUtterance(parts[i++].trim());
         if (browserVoice) u.voice = browserVoice;
-        u.rate = 1;
-        u.pitch = 1.05;
+        u.lang = browserVoice ? browserVoice.lang : "en-GB";
+        u.rate = 0.98;
+        u.pitch = 1.04;
         u.onend = next;
         u.onerror = () => resolve();
         speechSynthesis.speak(u);
@@ -85,36 +119,10 @@
     });
   }
 
-  async function speakWithPremium(text) {
-    const res = await fetch("/api/tts", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text }),
-    });
-    if (res.status !== 200) { premiumVoice = false; return false; }
-    premiumVoice = true;
-    const url = URL.createObjectURL(await res.blob());
-    if (state !== "speaking") return true;
-    await new Promise((resolve) => {
-      const audio = new Audio(url);
-      currentAudio = audio;
-      audio.onended = audio.onerror = audio.onpause = () => resolve();
-      audio.play().catch(() => resolve());
-    });
-    URL.revokeObjectURL(url);
-    return true;
-  }
-
   async function speak(text) {
-    if (muted) return setState("idle");
+    if (muted || !window.speechSynthesis) return setState("idle");
     setState("speaking");
-    try {
-      let done = false;
-      if (premiumVoice !== false) done = await speakWithPremium(text);
-      if (!done) await speakWithBrowser(text);
-    } catch {
-      await speakWithBrowser(text);
-    }
+    await speakWithBrowser(text);
     if (state === "speaking") setState("idle");
   }
 
@@ -123,26 +131,12 @@
     question = question.trim();
     if (!question || state === "thinking") return;
     stopSpeaking();
-    history.push({ role: "user", content: question });
     addMsg("user", question);
     setState("thinking");
-
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ messages: history }),
-      });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok || !data.reply) throw new Error(data.error || "Something went wrong. Please try again.");
-      history.push({ role: "assistant", content: data.reply });
-      addMsg("assistant", data.reply);
-      await speak(data.reply);
-    } catch (err) {
-      history.pop(); // drop the unanswered question so the conversation stays valid
-      addMsg("assistant", err.message, "error");
-      setState("idle");
-    }
+    await new Promise((r) => setTimeout(r, 450 + Math.random() * 350)); // a natural pause
+    const reply = findAnswer(question);
+    addMsg("assistant", reply);
+    await speak(reply);
   }
 
   // ───────── Speech input ─────────
@@ -201,16 +195,12 @@
     }
   }
 
-  // Unlock audio playback on iOS/Safari during the first user gesture.
+  // Unlock speech on iOS/Safari during the first user gesture.
   let unlocked = false;
   function unlockAudio() {
-    if (unlocked) return;
+    if (unlocked || !window.speechSynthesis) return;
     unlocked = true;
-    try {
-      const a = new Audio("data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4Ljc2LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAABIADAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDA//////////////////////////////////////////8AAAAATGF2YzU4LjEzAAAAAAAAAAAAAAAAJAAAAAAAAAAAASDs90hvAAAAAAAAAAAAAAAAAAAA");
-      a.play().catch(() => {});
-      if (window.speechSynthesis) speechSynthesis.speak(new SpeechSynthesisUtterance(""));
-    } catch { /* ignore */ }
+    try { speechSynthesis.speak(new SpeechSynthesisUtterance("")); } catch { /* ignore */ }
   }
 
   // ───────── Events ─────────
